@@ -89,14 +89,15 @@
       const videoRef        = useRef(null);
       const canvasRef       = useRef(null);
       const sampleRef       = useRef(null);
-      const calibrationRef  = useRef(null);  // read inside onResults without dep
-      const pixelHeightRef  = useRef(0);     // latest frame px height, for calibration snap
+      const calibrationRef  = useRef(null);
+      const pixelHeightRef  = useRef(0);
 
-      const [status, setStatus]         = useState('Initializing…');
-      const [data, setData]             = useState(null);
+      const [status, setStatus]           = useState('Initializing…');
+      const [data, setData]               = useState(null);
       const [calibration, setCalibration] = useState(null);
       const [heightInput, setHeightInput] = useState('');
       const [calError, setCalError]       = useState('');
+      const [facingMode, setFacingMode]   = useState('user');
 
       function doCalibrate() {
         const cm = parseFloat(heightInput);
@@ -287,6 +288,7 @@
           },
           width: 640,
           height: 480,
+          facingMode,
         });
 
         camera.start()
@@ -294,7 +296,7 @@
           .catch(e => setStatus(`Camera error: ${e.message}`));
 
         return () => { camera.stop(); pose.close(); };
-      }, [onResults]);
+      }, [onResults, facingMode]);
 
       const Row = ({ label, val }) => (
         <div className="flex justify-between gap-4">
@@ -304,134 +306,135 @@
       );
 
       return (
-        <div className="flex min-h-screen bg-gray-950 text-gray-100 p-4 gap-6 font-mono">
+        <div className="flex flex-col md:flex-row min-h-screen bg-gray-950 text-gray-100 font-mono">
 
-          {/* LEFT: camera + canvas */}
-          <div className="flex flex-col gap-1 shrink-0">
-            <div className="flex justify-between text-xs text-gray-500 mb-1">
-              <span>Camera + Skeleton Overlay</span>
+          {/* TOP / LEFT: camera */}
+          <div className="flex flex-col p-3 md:p-4 gap-1 md:shrink-0">
+            <div className="flex justify-between items-center text-xs text-gray-500 mb-1">
+              <span className="text-gray-300 font-bold tracking-wide">Body Detector POC</span>
               <span className={
                 status === 'Live'                  ? 'text-green-400' :
                 status.startsWith('Camera error') ? 'text-red-400'   : 'text-yellow-400'
               }>● {status}</span>
             </div>
+
             <div className="relative bg-black border border-gray-800">
               <video ref={videoRef} className="hidden" autoPlay playsInline muted />
-              <canvas ref={canvasRef} className="block" style={{ maxWidth: 640 }} />
+              <canvas ref={canvasRef} className="block w-full" style={{ maxWidth: 640 }} />
               <canvas ref={sampleRef} className="hidden" />
               {!data && (
-                <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-sm pointer-events-none">
+                <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-sm pointer-events-none text-center px-4">
                   Stand 1.5–2 m from camera — full body in frame
                 </div>
               )}
             </div>
-            <div className="text-xs text-gray-700 mt-1">
-              Green dashed line = height span &nbsp;|&nbsp; Yellow circle = skin sample (nose)
+
+            <div className="flex justify-between items-center mt-1">
+              <div className="text-xs text-gray-700">
+                Green line = height &nbsp;·&nbsp; Yellow = skin sample
+              </div>
+              <button
+                onClick={() => setFacingMode(m => m === 'user' ? 'environment' : 'user')}
+                className="text-xs text-gray-400 bg-gray-800 active:bg-gray-700 px-2 py-1 rounded"
+              >
+                {facingMode === 'user' ? 'Front cam' : 'Back cam'}
+              </button>
             </div>
           </div>
 
-          {/* RIGHT: results */}
-          <div className="w-56 flex flex-col gap-5 text-sm pt-6">
+          {/* BOTTOM / RIGHT: results */}
+          <div className="flex-1 p-3 md:p-4 md:pt-10 border-t md:border-t-0 md:border-l border-gray-800 md:max-w-[15rem]">
+            {/* 2-col grid on mobile, stacked on desktop */}
+            <div className="grid grid-cols-2 md:flex md:flex-col gap-4 md:gap-5 text-sm">
 
-            {/* Height */}
-            <div>
-              <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Height</div>
-              {calibration ? (
-                <div>
-                  <div className="text-2xl font-bold text-green-400">
-                    {data?.height ? `${data.height.cm} cm` : '—'}
+              {/* Height */}
+              <div>
+                <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Height</div>
+                {calibration ? (
+                  <div>
+                    <div className="text-2xl font-bold text-green-400">
+                      {data?.height ? `${data.height.cm} cm` : '—'}
+                    </div>
+                    <div className="text-gray-400 text-sm">{data?.height?.ftIn ?? ''}</div>
+                    <button onClick={clearCalibration} className="mt-1 text-xs text-gray-600 underline">
+                      reset
+                    </button>
                   </div>
-                  <div className="text-gray-400 text-sm">
-                    {data?.height ? data.height.ftIn : ''}
+                ) : (
+                  <div className="space-y-2">
+                    <div className="text-xs text-gray-500">Enter real height to calibrate</div>
+                    <div className="flex gap-2">
+                      <input
+                        type="number"
+                        placeholder="cm"
+                        value={heightInput}
+                        onChange={e => { setHeightInput(e.target.value); setCalError(''); }}
+                        onKeyDown={e => e.key === 'Enter' && doCalibrate()}
+                        className="w-16 bg-gray-800 border border-gray-700 text-white px-2 py-2 text-sm rounded focus:outline-none"
+                      />
+                      <button
+                        onClick={doCalibrate}
+                        className="flex-1 md:flex-none bg-gray-700 active:bg-gray-600 text-white px-3 py-2 text-xs rounded"
+                      >Set</button>
+                    </div>
+                    {calError && <div className="text-red-400 text-xs">{calError}</div>}
+                    <div className="text-gray-700 text-xs">Stand straight, full body visible</div>
                   </div>
-                  <button
-                    onClick={clearCalibration}
-                    className="mt-1 text-xs text-gray-600 underline"
-                  >reset calibration</button>
+                )}
+              </div>
+
+              {/* Body type */}
+              <div>
+                <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Body Type</div>
+                <div className={`text-xl md:text-2xl font-bold leading-tight ${data ? (TYPE_COLOR[data.bodyType] ?? 'text-white') : 'text-gray-700'}`}>
+                  {data?.bodyType ?? '—'}
                 </div>
-              ) : (
+              </div>
+
+              {/* Measurements + Ratios */}
+              <div>
+                <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Measurements</div>
                 <div className="space-y-1">
-                  <div className="text-xs text-gray-500">
-                    Enter your real height to calibrate px → cm
-                  </div>
-                  <div className="flex gap-2 items-center">
-                    <input
-                      type="number"
-                      placeholder="cm"
-                      value={heightInput}
-                      onChange={e => { setHeightInput(e.target.value); setCalError(''); }}
-                      onKeyDown={e => e.key === 'Enter' && doCalibrate()}
-                      className="w-20 bg-gray-800 border border-gray-700 text-white px-2 py-1 text-sm rounded focus:outline-none"
-                    />
-                    <button
-                      onClick={doCalibrate}
-                      className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 text-xs rounded"
-                    >Set</button>
-                  </div>
-                  {calError && <div className="text-red-400 text-xs">{calError}</div>}
-                  <div className="text-gray-700 text-xs">Stand straight, full body visible</div>
+                  <Row label="Shoulder" val={data?.shoulderW && `${data.shoulderW}px`} />
+                  <Row label="Waist ~"  val={data?.waistW    && `${data.waistW}px`}    />
+                  <Row label="Hip"      val={data?.hipW      && `${data.hipW}px`}      />
+                  <div className="border-t border-gray-800 my-1" />
+                  <Row label="S/H" val={data?.s2h} />
+                  <Row label="W/H" val={data?.w2h} />
                 </div>
-              )}
-            </div>
-
-            {/* Body type */}
-            <div>
-              <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Body Type</div>
-              <div className={`text-2xl font-bold ${data ? (TYPE_COLOR[data.bodyType] ?? 'text-white') : 'text-gray-700'}`}>
-                {data?.bodyType ?? '—'}
               </div>
-            </div>
 
-            {/* Measurements */}
-            <div>
-              <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Measurements (px)</div>
-              <div className="space-y-1">
-                <Row label="Shoulder" val={data?.shoulderW && `${data.shoulderW}px`} />
-                <Row label="Waist ~"  val={data?.waistW    && `${data.waistW}px`}    />
-                <Row label="Hip"      val={data?.hipW      && `${data.hipW}px`}      />
-              </div>
-            </div>
-
-            {/* Ratios */}
-            <div>
-              <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Ratios</div>
-              <div className="space-y-1">
-                <Row label="Shoulder / Hip" val={data?.s2h} />
-                <Row label="Waist / Hip"    val={data?.w2h} />
-              </div>
-            </div>
-
-            {/* Skin tone */}
-            <div>
-              <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Skin Tone</div>
-              {data ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-10 h-10 rounded border border-gray-700 shrink-0"
-                      style={{ backgroundColor: data.skin.hex }}
-                    />
-                    <div>
-                      <div className="font-bold">{data.skin.fitz.type}</div>
-                      <div className="text-xs text-gray-400">{data.skin.fitz.label}</div>
+              {/* Skin tone */}
+              <div>
+                <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Skin Tone</div>
+                {data ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <div
+                        className="w-9 h-9 rounded border border-gray-700 shrink-0"
+                        style={{ backgroundColor: data.skin.hex }}
+                      />
+                      <div>
+                        <div className="font-bold text-xs">{data.skin.fitz.type}</div>
+                        <div className="text-xs text-gray-400">{data.skin.fitz.label}</div>
+                      </div>
+                    </div>
+                    <div className="text-xs text-gray-500 space-y-0.5">
+                      <div>{data.skin.hex.toUpperCase()}</div>
+                      <div>{data.skin.rgb}</div>
                     </div>
                   </div>
-                  <div className="text-xs text-gray-500 space-y-0.5">
-                    <div>{data.skin.hex.toUpperCase()}</div>
-                    <div>{data.skin.rgb}</div>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-gray-700">—</div>
-              )}
-            </div>
+                ) : <div className="text-gray-700">—</div>}
+              </div>
 
-            {/* Notes */}
-            <div className="mt-auto border-t border-gray-800 pt-3 text-xs text-gray-600 space-y-1 leading-relaxed">
-              <div>Height: nose→ankle + 15% head offset</div>
-              <div>Waist = estimated (no direct landmark)</div>
-              <div>Skin sampled 8px radius at nose</div>
-              <div>Accuracy ±5 cm when standing straight</div>
+              {/* Notes — hidden on mobile */}
+              <div className="hidden md:block col-span-2 border-t border-gray-800 pt-3 text-xs text-gray-600 space-y-1 leading-relaxed">
+                <div>Height: nose→ankle + 15% head offset</div>
+                <div>Waist = estimated (no direct landmark)</div>
+                <div>Skin sampled 8px radius at nose</div>
+                <div>Accuracy ±5 cm when standing straight</div>
+              </div>
+
             </div>
           </div>
         </div>
