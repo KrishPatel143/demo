@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Body Type + Skin Tone Detector — POC</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+</head>
+<body class="bg-gray-950">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // Fitzpatrick scale: ordered highest luminance first
+    const FITZ = [
+      { type: 'Type I',   label: 'Very Fair',       minL: 210 },
+      { type: 'Type II',  label: 'Fair',             minL: 180 },
+      { type: 'Type III', label: 'Medium',           minL: 145 },
+      { type: 'Type IV',  label: 'Olive / Med Dark', minL: 110 },
+      { type: 'Type V',   label: 'Brown',            minL: 70  },
+      { type: 'Type VI',  label: 'Deep Brown/Black', minL: 0   },
+    ];
+
+    function getFitz(r, g, b) {
+      const L = 0.299 * r + 0.587 * g + 0.114 * b;
+      return FITZ.find(f => L >= f.minL) ?? FITZ[5];
+    }
+
+    function toHex(r, g, b) {
+      return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+    }
+
+    // Classify based on shoulder/hip/waist ratios
+    function classifyBody(sh, wa, hi) {
+      if (hi <= 0 || sh <= 0) return '—';
+      const s2h = sh / hi;
+      const w2h = wa / hi;
+      if (s2h > 1.15)                                    return 'Inverted Triangle';
+      if (hi / sh > 1.15)                                return 'Pear';
+      if (w2h > 0.88)                                    return 'Apple';
+      if (s2h >= 0.90 && s2h <= 1.10 && w2h < 0.82)    return 'Hourglass';
+      return 'Rectangle';
+    }
+
+    const TYPE_COLOR = {
+      'Hourglass':          'text-pink-400',
+      'Pear':               'text-yellow-400',
+      'Apple':              'text-orange-400',
+      'Rectangle':          'text-blue-400',
+      'Inverted Triangle':  'text-purple-400',
+      '—':                  'text-gray-600',
+    };
+
+    // Draw a horizontal measurement line with tick marks and label on the canvas
+    function drawMeasureLine(ctx, y, x1, x2, W, H, color, label) {
+      const py = y * H, px1 = x1 * W, px2 = x2 * W;
+      ctx.beginPath();
+      ctx.moveTo(px1, py);
+      ctx.lineTo(px2, py);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      [px1, px2].forEach(px => {
+        ctx.beginPath();
+        ctx.moveTo(px, py - 5);
+        ctx.lineTo(px, py + 5);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+      ctx.fillStyle = color;
+      ctx.font = 'bold 11px monospace';
+      ctx.fillText(label, (px1 + px2) / 2 - ctx.measureText(label).width / 2, py - 8);
+    }
+
+    function App() {
+      const videoRef  = useRef(null);
+      const canvasRef = useRef(null);
+      const sampleRef = useRef(null);   // hidden canvas for pixel sampling
+
+      const [status, setStatus] = useState('Initializing…');
+      const [data, setData]     = useState(null);
+
+      const onResults = useCallback((results) => {
+        const video  = videoRef.current;
+        const canvas = canvasRef.current;
+        const sample = sampleRef.current;
+        if (!canvas || !video) return;
+
+        const W = video.videoWidth  || 640;
+        const H = video.videoHeight || 480;
+        canvas.width  = W;
+        canvas.height = H;
+
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, W, H);
+        ctx.drawImage(results.image, 0, 0, W, H);
+
+        if (!results.poseLandmarks) {
+          setStatus('No pose detected — step back from camera');
+          return;
+        }
+
+        const lm = results.poseLandmarks;
+
+        // Draw skeleton overlay
+        window.drawConnectors(ctx, lm, window.POSE_CONNECTIONS, { color: '#00E676', lineWidth: 2 });
+        window.drawLandmarks(ctx, lm, { color: '#FF1744', lineWidth: 1, radius: 3 });
+
+        const ls   = lm[11]; // left shoulder
+        const rs   = lm[12]; // right shoulder
+        const lh   = lm[23]; // left hip
+        const rh   = lm[24]; // right hip
+        const nose = lm[0];  // nose — skin sample point
+
+        if (!(ls && rs && lh && rh && nose)) {
+          setStatus('Partial pose — ensure full body is visible');
+          return;
+        }
+
+        setStatus('Live');
+
+        // --- Measurements ---
+        const shoulderW = Math.abs(rs.x - ls.x) * W;
+        const hipW      = Math.abs(rh.x - lh.x) * W;
+
+        // Waist: interpolate body outline at 55% shoulder→hip, apply 0.82 narrowing factor
+        // MediaPipe has no waist landmark; this is the best approximation from skeletal points
+        const wLx = ls.x + (lh.x - ls.x) * 0.55;
+        const wRx = rs.x + (rh.x - rs.x) * 0.55;
+        const wY  = ls.y + (lh.y - ls.y) * 0.55;
+        const waistW = Math.abs(wRx - wLx) * W * 0.82;
+
+        // Draw measurement lines
+        drawMeasureLine(ctx, ls.y, ls.x, rs.x, W, H, '#00BCD4', 'Shoulder');
+        drawMeasureLine(ctx, wY,   wLx,  wRx,  W, H, '#FF9800', 'Waist ~');
+        drawMeasureLine(ctx, lh.y, lh.x, rh.x, W, H, '#E040FB', 'Hip');
+
+        // --- Skin tone: sample 8px radius around nose landmark ---
+        sample.width  = W;
+        sample.height = H;
+        const sc = sample.getContext('2d');
+        sc.drawImage(video, 0, 0, W, H);
+
+        const nx = Math.round(nose.x * W);
+        const ny = Math.round(nose.y * H);
+        const SR = 8;
+        const sx0 = Math.max(0, nx - SR);
+        const sy0 = Math.max(0, ny - SR);
+        const sw  = Math.min(SR * 2, W - sx0);
+        const sh2 = Math.min(SR * 2, H - sy0);
+
+        let sumR = 0, sumG = 0, sumB = 0, cnt = 0;
+        try {
+          const px = sc.getImageData(sx0, sy0, sw, sh2).data;
+          for (let i = 0; i < px.length; i += 4) {
+            sumR += px[i]; sumG += px[i + 1]; sumB += px[i + 2]; cnt++;
+          }
+        } catch (_) { /* CORS guard — shouldn't happen with local webcam */ }
+
+        const skinR = cnt ? (sumR / cnt | 0) : 150;
+        const skinG = cnt ? (sumG / cnt | 0) : 110;
+        const skinB = cnt ? (sumB / cnt | 0) : 90;
+
+        // Highlight sample region on canvas
+        ctx.beginPath();
+        ctx.arc(nx, ny, SR, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#FFEB3B';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        setData({
+          bodyType: classifyBody(shoulderW, waistW, hipW),
+          shoulderW: shoulderW.toFixed(0),
+          waistW:    waistW.toFixed(0),
+          hipW:      hipW.toFixed(0),
+          s2h:       (shoulderW / hipW).toFixed(2),
+          w2h:       (waistW    / hipW).toFixed(2),
+          skin: {
+            fitz: getFitz(skinR, skinG, skinB),
+            hex:  toHex(skinR, skinG, skinB),
+            rgb:  `rgb(${skinR}, ${skinG}, ${skinB})`,
+          },
+        });
+      }, []);
+
+      useEffect(() => {
+        const pose = new window.Pose({
+          locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`,
+        });
+        pose.setOptions({
+          modelComplexity: 1,
+          smoothLandmarks: true,
+          enableSegmentation: false,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        pose.onResults(onResults);
+
+        const camera = new window.Camera(videoRef.current, {
+          onFrame: async () => {
+            if (videoRef.current) await pose.send({ image: videoRef.current });
+          },
+          width: 640,
+          height: 480,
+        });
+
+        camera.start()
+          .then(() => setStatus('Starting detection…'))
+          .catch(e => setStatus(`Camera error: ${e.message}`));
+
+        return () => { camera.stop(); pose.close(); };
+      }, [onResults]);
+
+      const Row = ({ label, val }) => (
+        <div className="flex justify-between gap-4">
+          <span className="text-gray-500">{label}</span>
+          <span className="tabular-nums">{val ?? '—'}</span>
+        </div>
+      );
+
+      return (
+        <div className="flex min-h-screen bg-gray-950 text-gray-100 p-4 gap-6 font-mono">
+
+          {/* LEFT: camera + skeleton canvas */}
+          <div className="flex flex-col gap-1 shrink-0">
+            <div className="flex justify-between text-xs text-gray-500 mb-1">
+              <span>Camera + Skeleton Overlay</span>
+              <span className={
+                status === 'Live' ? 'text-green-400' :
+                status.startsWith('Camera error') ? 'text-red-400' : 'text-yellow-400'
+              }>
+                ● {status}
+              </span>
+            </div>
+            <div className="relative bg-black border border-gray-800">
+              <video ref={videoRef} className="hidden" autoPlay playsInline muted />
+              <canvas ref={canvasRef} className="block" style={{ maxWidth: 640 }} />
+              <canvas ref={sampleRef} className="hidden" />
+              {!data && (
+                <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-sm pointer-events-none">
+                  Stand 1.5–2 m from camera — full body visible
+                </div>
+              )}
+            </div>
+            <div className="text-xs text-gray-700 mt-1">
+              Yellow circle = skin sample region (nose landmark)
+            </div>
+          </div>
+
+          {/* RIGHT: results */}
+          <div className="w-52 flex flex-col gap-5 text-sm pt-6">
+
+            <div>
+              <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Body Type</div>
+              <div className={`text-2xl font-bold ${data ? (TYPE_COLOR[data.bodyType] ?? 'text-white') : 'text-gray-700'}`}>
+                {data?.bodyType ?? '—'}
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Measurements (px)</div>
+              <div className="space-y-1">
+                <Row label="Shoulder" val={data?.shoulderW && `${data.shoulderW}px`} />
+                <Row label="Waist ~"  val={data?.waistW    && `${data.waistW}px`}    />
+                <Row label="Hip"      val={data?.hipW      && `${data.hipW}px`}      />
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Ratios</div>
+              <div className="space-y-1">
+                <Row label="Shoulder / Hip" val={data?.s2h} />
+                <Row label="Waist / Hip"    val={data?.w2h} />
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Skin Tone</div>
+              {data ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded border border-gray-700 shrink-0"
+                      style={{ backgroundColor: data.skin.hex }}
+                    />
+                    <div>
+                      <div className="font-bold">{data.skin.fitz.type}</div>
+                      <div className="text-xs text-gray-400">{data.skin.fitz.label}</div>
+                    </div>
+                  </div>
+                  <div className="text-xs text-gray-500 space-y-0.5">
+                    <div>{data.skin.hex.toUpperCase()}</div>
+                    <div>{data.skin.rgb}</div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-gray-700">—</div>
+              )}
+            </div>
+
+            <div className="mt-auto border-t border-gray-800 pt-3 text-xs text-gray-600 space-y-1 leading-relaxed">
+              <div>Waist = estimated (no direct landmark)</div>
+              <div>Skin sampled 8px radius at nose</div>
+              <div>Lighting conditions affect tone accuracy</div>
+              <div>px values relative to frame size</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
