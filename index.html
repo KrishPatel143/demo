@@ -54,6 +54,12 @@
       return `${ft}'${inch}"`;
     }
 
+    // Format a raw px value: show cm if scale is set, otherwise show px
+    function fmt(px, scale, decimals = 1) {
+      if (!scale) return `${Math.round(px)} px`;
+      return `${(px / scale.pxPerCm).toFixed(decimals)} cm`;
+    }
+
     const TYPE_COLOR = {
       'Hourglass':         'text-pink-400',
       'Pear':              'text-yellow-400',
@@ -86,40 +92,43 @@
     }
 
     function App() {
-      const videoRef        = useRef(null);
-      const canvasRef       = useRef(null);
-      const sampleRef       = useRef(null);
-      const calibrationRef  = useRef(null);
-      const pixelHeightRef  = useRef(0);
+      const videoRef       = useRef(null);
+      const canvasRef      = useRef(null);
+      const sampleRef      = useRef(null);
+      const scaleRef       = useRef(null);   // { pxPerCm } — read inside onResults
+      const shoulderPxRef  = useRef(0);      // live shoulder px, used to auto-fill calibration
 
-      const [status, setStatus]           = useState('Initializing…');
-      const [data, setData]               = useState(null);
-      const [calibration, setCalibration] = useState(null);
-      const [heightInput, setHeightInput] = useState('');
-      const [calError, setCalError]       = useState('');
-      const [facingMode, setFacingMode]   = useState('user');
+      const [status, setStatus]         = useState('Initializing…');
+      const [data, setData]             = useState(null);
+      const [scale, setScale]           = useState(null);  // null = not calibrated
+      const [refPxInput, setRefPxInput] = useState('');    // user enters reference px
+      const [refCmInput, setRefCmInput] = useState('');    // user enters real cm
+      const [scaleErr, setScaleErr]     = useState('');
+      const [facingMode, setFacingMode] = useState('user');
 
-      function doCalibrate() {
-        const cm = parseFloat(heightInput);
-        if (isNaN(cm) || cm < 50 || cm > 280) {
-          setCalError('Enter a height between 50–280 cm');
-          return;
-        }
-        const pxH = pixelHeightRef.current;
-        if (pxH <= 0) {
-          setCalError('No pose detected — stand in frame first');
-          return;
-        }
-        const cal = { heightCm: cm, pxPerCm: pxH / cm };
-        calibrationRef.current = cal;
-        setCalibration(cal);
-        setCalError('');
+      // Auto-fill px input from live shoulder detection when field is empty
+      function useShoulderPx() {
+        const v = Math.round(shoulderPxRef.current);
+        if (v > 0) { setRefPxInput(String(v)); setScaleErr(''); }
       }
 
-      function clearCalibration() {
-        calibrationRef.current = null;
-        setCalibration(null);
-        setHeightInput('');
+      function doSetScale() {
+        const px = parseFloat(refPxInput);
+        const cm = parseFloat(refCmInput);
+        if (isNaN(px) || px <= 0)          { setScaleErr('Enter a valid px value'); return; }
+        if (isNaN(cm) || cm <= 0 || cm > 300) { setScaleErr('Enter a valid cm value'); return; }
+        const s = { pxPerCm: px / cm };
+        scaleRef.current = s;
+        setScale(s);
+        setScaleErr('');
+      }
+
+      function clearScale() {
+        scaleRef.current = null;
+        setScale(null);
+        setRefPxInput('');
+        setRefCmInput('');
+        setScaleErr('');
       }
 
       const onResults = useCallback((results) => {
@@ -146,13 +155,13 @@
         window.drawConnectors(ctx, lm, window.POSE_CONNECTIONS, { color: '#00E676', lineWidth: 2 });
         window.drawLandmarks(ctx, lm, { color: '#FF1744', lineWidth: 1, radius: 3 });
 
-        const ls     = lm[11]; // left shoulder
-        const rs     = lm[12]; // right shoulder
-        const lh     = lm[23]; // left hip
-        const rh     = lm[24]; // right hip
-        const nose   = lm[0];  // nose
-        const lAnkle = lm[27]; // left ankle
-        const rAnkle = lm[28]; // right ankle
+        const ls     = lm[11];
+        const rs     = lm[12];
+        const lh     = lm[23];
+        const rh     = lm[24];
+        const nose   = lm[0];
+        const lAnkle = lm[27];
+        const rAnkle = lm[28];
 
         if (!(ls && rs && lh && rh && nose)) {
           setStatus('Partial pose — ensure full body is visible');
@@ -161,34 +170,38 @@
 
         setStatus('Live');
 
-        // --- Body measurements ---
-        const shoulderW = Math.abs(rs.x - ls.x) * W;
-        const hipW      = Math.abs(rh.x - lh.x) * W;
+        // --- Raw px measurements ---
+        const shoulderPx = Math.abs(rs.x - ls.x) * W;
+        const hipPx      = Math.abs(rh.x - lh.x) * W;
         const wLx = ls.x + (lh.x - ls.x) * 0.55;
         const wRx = rs.x + (rh.x - rs.x) * 0.55;
         const wY  = ls.y + (lh.y - ls.y) * 0.55;
-        const waistW = Math.abs(wRx - wLx) * W * 0.82;
+        const waistPx = Math.abs(wRx - wLx) * W * 0.82;
 
-        drawMeasureLine(ctx, ls.y, ls.x, rs.x, W, H, '#00BCD4', 'Shoulder');
-        drawMeasureLine(ctx, wY,   wLx,  wRx,  W, H, '#FF9800', 'Waist ~');
-        drawMeasureLine(ctx, lh.y, lh.x, rh.x, W, H, '#E040FB', 'Hip');
+        shoulderPxRef.current = shoulderPx;
 
-        // --- Height estimation ---
-        // Nose→ankle pixel span + 15% for the head above nose (no top-of-head landmark)
-        let heightData = null;
+        const sc = scaleRef.current;
+
+        // Labels on measurement lines: cm if calibrated, else px
+        const sLabel = sc ? `S ${(shoulderPx / sc.pxPerCm).toFixed(1)}cm` : `S ${Math.round(shoulderPx)}px`;
+        const wLabel = sc ? `W ${(waistPx   / sc.pxPerCm).toFixed(1)}cm` : `W ${Math.round(waistPx)}px`;
+        const hLabel = sc ? `H ${(hipPx     / sc.pxPerCm).toFixed(1)}cm` : `H ${Math.round(hipPx)}px`;
+
+        drawMeasureLine(ctx, ls.y, ls.x, rs.x, W, H, '#00BCD4', sLabel);
+        drawMeasureLine(ctx, wY,   wLx,  wRx,  W, H, '#FF9800', wLabel);
+        drawMeasureLine(ctx, lh.y, lh.x, rh.x, W, H, '#E040FB', hLabel);
+
+        // --- Height (nose→ankle + 15% for head above nose) ---
+        let heightPx = 0;
         if (lAnkle && rAnkle) {
           const noseY     = nose.y * H;
           const avgAnkleY = ((lAnkle.y + rAnkle.y) / 2) * H;
           const bodyPx    = avgAnkleY - noseY;
-
           if (bodyPx > 0) {
-            const totalPx  = bodyPx * 1.15;
-            pixelHeightRef.current = totalPx;
+            heightPx = bodyPx * 1.15;
+            const estTopY = noseY - bodyPx * 0.15;
+            const lineX   = Math.min(lAnkle.x, rAnkle.x) * W - 18;
 
-            const estTopY  = noseY - bodyPx * 0.15; // estimated crown
-            const lineX    = Math.min(lAnkle.x, rAnkle.x) * W - 18; // left of body
-
-            // Vertical dashed height line
             ctx.setLineDash([5, 4]);
             ctx.beginPath();
             ctx.moveTo(lineX, estTopY);
@@ -198,7 +211,6 @@
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // End tick marks
             [estTopY, avgAnkleY].forEach(y => {
               ctx.beginPath();
               ctx.moveTo(lineX - 6, y);
@@ -208,26 +220,22 @@
               ctx.stroke();
             });
 
-            const cal = calibrationRef.current;
-            if (cal) {
-              const cm = totalPx / cal.pxPerCm;
-              heightData = { cm: cm.toFixed(1), ftIn: cmToFtIn(cm) };
-
-              // Label on canvas
+            if (sc && heightPx > 0) {
+              const hCm = heightPx / sc.pxPerCm;
               ctx.fillStyle = '#76FF03';
               ctx.font = 'bold 12px monospace';
-              const label = `${Math.round(cm)}cm`;
-              ctx.fillText(label, lineX - ctx.measureText(label).width - 4,
+              const htLabel = `${hCm.toFixed(1)}cm`;
+              ctx.fillText(htLabel, lineX - ctx.measureText(htLabel).width - 4,
                            (estTopY + avgAnkleY) / 2 + 4);
             }
           }
         }
 
-        // --- Skin tone ---
+        // --- Skin tone (nose, 8px radius) ---
         sample.width  = W;
         sample.height = H;
-        const sc = sample.getContext('2d');
-        sc.drawImage(video, 0, 0, W, H);
+        const sctx = sample.getContext('2d');
+        sctx.drawImage(video, 0, 0, W, H);
 
         const nx = Math.round(nose.x * W);
         const ny = Math.round(nose.y * H);
@@ -237,9 +245,9 @@
 
         let sumR = 0, sumG = 0, sumB = 0, cnt = 0;
         try {
-          const px = sc.getImageData(sx0, sy0, sw, sh2).data;
-          for (let i = 0; i < px.length; i += 4) {
-            sumR += px[i]; sumG += px[i + 1]; sumB += px[i + 2]; cnt++;
+          const pd = sctx.getImageData(sx0, sy0, sw, sh2).data;
+          for (let i = 0; i < pd.length; i += 4) {
+            sumR += pd[i]; sumG += pd[i + 1]; sumB += pd[i + 2]; cnt++;
           }
         } catch (_) {}
 
@@ -253,14 +261,15 @@
         ctx.lineWidth = 2;
         ctx.stroke();
 
+        // Store raw px; display layer converts to cm using scale
         setData({
-          bodyType:  classifyBody(shoulderW, waistW, hipW),
-          shoulderW: shoulderW.toFixed(0),
-          waistW:    waistW.toFixed(0),
-          hipW:      hipW.toFixed(0),
-          s2h:       (shoulderW / hipW).toFixed(2),
-          w2h:       (waistW    / hipW).toFixed(2),
-          height:    heightData,
+          bodyType:  classifyBody(shoulderPx, waistPx, hipPx),
+          shoulderPx,
+          waistPx,
+          hipPx,
+          heightPx,
+          s2h: (shoulderPx / hipPx).toFixed(2),
+          w2h: (waistPx    / hipPx).toFixed(2),
           skin: {
             fitz: getFitz(skinR, skinG, skinB),
             hex:  toHex(skinR, skinG, skinB),
@@ -299,16 +308,19 @@
       }, [onResults, facingMode]);
 
       const Row = ({ label, val }) => (
-        <div className="flex justify-between gap-4">
-          <span className="text-gray-500">{label}</span>
-          <span className="tabular-nums">{val ?? '—'}</span>
+        <div className="flex justify-between gap-2">
+          <span className="text-gray-500 shrink-0">{label}</span>
+          <span className="tabular-nums text-right">{val ?? '—'}</span>
         </div>
       );
+
+      const heightCm  = (scale && data?.heightPx)  ? data.heightPx  / scale.pxPerCm : null;
+      const calibrated = !!scale;
 
       return (
         <div className="flex flex-col md:flex-row min-h-screen bg-gray-950 text-gray-100 font-mono">
 
-          {/* TOP / LEFT: camera */}
+          {/* Camera panel */}
           <div className="flex flex-col p-3 md:p-4 gap-1 md:shrink-0">
             <div className="flex justify-between items-center text-xs text-gray-500 mb-1">
               <span className="text-gray-300 font-bold tracking-wide">Body Detector POC</span>
@@ -342,97 +354,147 @@
             </div>
           </div>
 
-          {/* BOTTOM / RIGHT: results */}
-          <div className="flex-1 p-3 md:p-4 md:pt-10 border-t md:border-t-0 md:border-l border-gray-800 md:max-w-[15rem]">
-            {/* 2-col grid on mobile, stacked on desktop */}
-            <div className="grid grid-cols-2 md:flex md:flex-col gap-4 md:gap-5 text-sm">
+          {/* Results + calibration panel */}
+          <div className="flex-1 p-3 md:p-4 md:pt-6 border-t md:border-t-0 md:border-l border-gray-800 md:max-w-[16rem]">
+            <div className="flex flex-col gap-4 text-sm">
 
-              {/* Height */}
-              <div>
-                <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Height</div>
-                {calibration ? (
-                  <div>
-                    <div className="text-2xl font-bold text-green-400">
-                      {data?.height ? `${data.height.cm} cm` : '—'}
+              {/* ── SCALE CALIBRATION ────────────────── */}
+              <div className={`rounded border p-3 space-y-2 ${calibrated ? 'border-green-800 bg-green-950/30' : 'border-gray-700 bg-gray-900/40'}`}>
+                <div className="text-xs text-gray-400 uppercase tracking-widest">
+                  Camera Scale {calibrated ? '✓ Set' : '— not set'}
+                </div>
+
+                {calibrated ? (
+                  <div className="space-y-1">
+                    <div className="text-xs text-gray-400">
+                      1 cm = {scale.pxPerCm.toFixed(2)} px
                     </div>
-                    <div className="text-gray-400 text-sm">{data?.height?.ftIn ?? ''}</div>
-                    <button onClick={clearCalibration} className="mt-1 text-xs text-gray-600 underline">
-                      reset
+                    <div className="text-xs text-gray-600 leading-relaxed">
+                      All measurements now in cm. Keep camera fixed — same spot for every person.
+                    </div>
+                    <button onClick={clearScale} className="text-xs text-gray-500 underline mt-1">
+                      Reset scale
                     </button>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <div className="text-xs text-gray-500">Enter real height to calibrate</div>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        placeholder="cm"
-                        value={heightInput}
-                        onChange={e => { setHeightInput(e.target.value); setCalError(''); }}
-                        onKeyDown={e => e.key === 'Enter' && doCalibrate()}
-                        className="w-16 bg-gray-800 border border-gray-700 text-white px-2 py-2 text-sm rounded focus:outline-none"
-                      />
+                    <div className="text-xs text-gray-500 leading-relaxed">
+                      Fix camera. Have person stand in spot. Enter any measurement you see on screen (px) and its real size (cm).
+                    </div>
+
+                    {/* Live shoulder hint */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-500">
+                        Live shoulder: <span className="text-gray-300 tabular-nums">
+                          {data ? `${Math.round(data.shoulderPx)} px` : '— px'}
+                        </span>
+                      </span>
                       <button
-                        onClick={doCalibrate}
-                        className="flex-1 md:flex-none bg-gray-700 active:bg-gray-600 text-white px-3 py-2 text-xs rounded"
+                        onClick={useShoulderPx}
+                        className="text-blue-500 underline text-xs"
+                      >use</button>
+                    </div>
+
+                    <div className="flex gap-2 items-center">
+                      <div className="flex flex-col gap-1 flex-1">
+                        <input
+                          type="number"
+                          placeholder="px value"
+                          value={refPxInput}
+                          onChange={e => { setRefPxInput(e.target.value); setScaleErr(''); }}
+                          onKeyDown={e => e.key === 'Enter' && doSetScale()}
+                          className="w-full bg-gray-800 border border-gray-700 text-white px-2 py-2 text-sm rounded focus:outline-none"
+                        />
+                        <input
+                          type="number"
+                          placeholder="real cm"
+                          value={refCmInput}
+                          onChange={e => { setRefCmInput(e.target.value); setScaleErr(''); }}
+                          onKeyDown={e => e.key === 'Enter' && doSetScale()}
+                          className="w-full bg-gray-800 border border-gray-700 text-white px-2 py-2 text-sm rounded focus:outline-none"
+                        />
+                      </div>
+                      <button
+                        onClick={doSetScale}
+                        className="bg-blue-700 active:bg-blue-600 text-white px-3 py-4 text-xs rounded"
                       >Set</button>
                     </div>
-                    {calError && <div className="text-red-400 text-xs">{calError}</div>}
-                    <div className="text-gray-700 text-xs">Stand straight, full body visible</div>
+                    {scaleErr && <div className="text-red-400 text-xs">{scaleErr}</div>}
                   </div>
                 )}
               </div>
 
-              {/* Body type */}
-              <div>
-                <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Body Type</div>
-                <div className={`text-xl md:text-2xl font-bold leading-tight ${data ? (TYPE_COLOR[data.bodyType] ?? 'text-white') : 'text-gray-700'}`}>
-                  {data?.bodyType ?? '—'}
-                </div>
-              </div>
+              {/* ── RESULTS GRID ────────────────────── */}
+              <div className="grid grid-cols-2 md:flex md:flex-col gap-4 md:gap-4">
 
-              {/* Measurements + Ratios */}
-              <div>
-                <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Measurements</div>
-                <div className="space-y-1">
-                  <Row label="Shoulder" val={data?.shoulderW && `${data.shoulderW}px`} />
-                  <Row label="Waist ~"  val={data?.waistW    && `${data.waistW}px`}    />
-                  <Row label="Hip"      val={data?.hipW      && `${data.hipW}px`}      />
-                  <div className="border-t border-gray-800 my-1" />
-                  <Row label="S/H" val={data?.s2h} />
-                  <Row label="W/H" val={data?.w2h} />
+                {/* Height */}
+                <div>
+                  <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Height</div>
+                  {heightCm ? (
+                    <div>
+                      <div className="text-2xl font-bold text-green-400">{heightCm.toFixed(1)} cm</div>
+                      <div className="text-gray-400 text-sm">{cmToFtIn(heightCm)}</div>
+                    </div>
+                  ) : (
+                    <div className="text-gray-600 text-lg">
+                      {calibrated ? '—' : 'Set scale first'}
+                    </div>
+                  )}
                 </div>
-              </div>
 
-              {/* Skin tone */}
-              <div>
-                <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Skin Tone</div>
-                {data ? (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <div
-                        className="w-9 h-9 rounded border border-gray-700 shrink-0"
-                        style={{ backgroundColor: data.skin.hex }}
-                      />
-                      <div>
-                        <div className="font-bold text-xs">{data.skin.fitz.type}</div>
-                        <div className="text-xs text-gray-400">{data.skin.fitz.label}</div>
+                {/* Body type */}
+                <div>
+                  <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Body Type</div>
+                  <div className={`text-xl font-bold leading-tight ${data ? (TYPE_COLOR[data.bodyType] ?? 'text-white') : 'text-gray-700'}`}>
+                    {data?.bodyType ?? '—'}
+                  </div>
+                </div>
+
+                {/* Measurements */}
+                <div>
+                  <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">
+                    Measurements {calibrated ? '(cm)' : '(px)'}
+                  </div>
+                  <div className="space-y-1">
+                    <Row label="Shoulder" val={data && fmt(data.shoulderPx, scale)} />
+                    <Row label="Waist ~"  val={data && fmt(data.waistPx,    scale)} />
+                    <Row label="Hip"      val={data && fmt(data.hipPx,       scale)} />
+                    <div className="border-t border-gray-800 my-1" />
+                    <Row label="S/H" val={data?.s2h} />
+                    <Row label="W/H" val={data?.w2h} />
+                  </div>
+                </div>
+
+                {/* Skin tone */}
+                <div>
+                  <div className="text-xs text-gray-500 uppercase tracking-widest mb-2">Skin Tone</div>
+                  {data ? (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="w-9 h-9 rounded border border-gray-700 shrink-0"
+                          style={{ backgroundColor: data.skin.hex }}
+                        />
+                        <div>
+                          <div className="font-bold text-xs">{data.skin.fitz.type}</div>
+                          <div className="text-xs text-gray-400">{data.skin.fitz.label}</div>
+                        </div>
+                      </div>
+                      <div className="text-xs text-gray-500 space-y-0.5">
+                        <div>{data.skin.hex.toUpperCase()}</div>
+                        <div>{data.skin.rgb}</div>
                       </div>
                     </div>
-                    <div className="text-xs text-gray-500 space-y-0.5">
-                      <div>{data.skin.hex.toUpperCase()}</div>
-                      <div>{data.skin.rgb}</div>
-                    </div>
-                  </div>
-                ) : <div className="text-gray-700">—</div>}
+                  ) : <div className="text-gray-700">—</div>}
+                </div>
+
               </div>
 
-              {/* Notes — hidden on mobile */}
-              <div className="hidden md:block col-span-2 border-t border-gray-800 pt-3 text-xs text-gray-600 space-y-1 leading-relaxed">
-                <div>Height: nose→ankle + 15% head offset</div>
-                <div>Waist = estimated (no direct landmark)</div>
-                <div>Skin sampled 8px radius at nose</div>
-                <div>Accuracy ±5 cm when standing straight</div>
+              {/* Notes */}
+              <div className="border-t border-gray-800 pt-3 text-xs text-gray-600 space-y-1 leading-relaxed">
+                <div>Height: nose→ankle + 15% head estimate</div>
+                <div>Waist: interpolated — no direct landmark</div>
+                <div>Skin: 8px radius sample at nose</div>
               </div>
 
             </div>
